@@ -17,8 +17,10 @@ package root
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net"
 	"net/http"
 	"os"
@@ -58,6 +60,22 @@ func loadTLSConfig(certPath, keyPath string) (*tls.Config, error) {
 	}, nil
 }
 
+func setupClientAuthTLSConfig(config *tls.Config, caCertPath string) error {
+	caCertPem, err := ioutil.ReadFile(caCertPath)
+	if err != nil {
+		return err
+	}
+
+	caCertPool := x509.NewCertPool()
+	if ok := caCertPool.AppendCertsFromPEM(caCertPem); !ok {
+		return errors.New("failed to parse ca pem cert")
+	}
+
+	config.ClientAuth = tls.RequireAndVerifyClientCert
+	config.ClientCAs = caCertPool
+	return nil
+}
+
 func setupHTTPServer(ctx context.Context, p provider.Provider, cfg *apiServerConfig) (_ func(), retErr error) {
 	var closers []io.Closer
 	cancel := func() {
@@ -80,6 +98,15 @@ func setupHTTPServer(ctx context.Context, p provider.Provider, cfg *apiServerCon
 		tlsCfg, err := loadTLSConfig(cfg.CertPath, cfg.KeyPath)
 		if err != nil {
 			return nil, err
+		}
+		if cfg.CACertPath != "" {
+			if err := setupClientAuthTLSConfig(tlsCfg, cfg.CACertPath); err != nil {
+				log.G(ctx).
+					WithField("caCertPath", cfg.CACertPath).
+					WithError(err).
+					Error("CA certificate path is provided, but failed to setup client auth TLS config")
+				return nil, err
+			}
 		}
 		l, err := tls.Listen("tcp", cfg.Addr, tlsCfg)
 		if err != nil {
@@ -145,14 +172,16 @@ func serveHTTP(ctx context.Context, s *http.Server, l net.Listener, name string)
 type apiServerConfig struct {
 	CertPath    string
 	KeyPath     string
+	CACertPath  string
 	Addr        string
 	MetricsAddr string
 }
 
 func getAPIConfig(c *opts.Opts) (*apiServerConfig, error) {
 	config := apiServerConfig{
-		CertPath: os.Getenv("APISERVER_CERT_LOCATION"),
-		KeyPath:  os.Getenv("APISERVER_KEY_LOCATION"),
+		CertPath:   os.Getenv("APISERVER_CERT_LOCATION"),
+		KeyPath:    os.Getenv("APISERVER_KEY_LOCATION"),
+		CACertPath: os.Getenv("APISERVER_CA_CERT_LOCATION"),
 	}
 
 	config.Addr = fmt.Sprintf(":%d", c.ListenPort)
